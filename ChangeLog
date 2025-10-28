@@ -1,10 +1,7 @@
-2.0:    2025-Oct-28 (Rust Rewrite)
+2.0:    2025-Oct-28
     * Rust rewrite of the original C codebase.
-    * Improved encoding detection algorithm:
-      - Added preliminary UTF-8 validation to avoid "fixing" already correct files.
-      - Enhanced Cyrillic character detection to prevent false positives.
-      - Better handling of decomposed Unicode characters (like combining diacritics).
-    * Fixed directory permissions handling in ZIP archives.
+    * (Hopefully) better encoding detection logic
+    * Fixed directory permissions in ZIP archives.
     * Dropped --target and --windows options, always targeting UTF-8.
 
 1.4:    2015-Dec-21
