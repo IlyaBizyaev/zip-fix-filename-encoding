@@ -4,7 +4,7 @@ use clap::Parser;
 use encoding_rs::*;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use zip::write::FileOptions;
 use zip::{HasZipMetadata, ZipArchive, ZipWriter};
@@ -30,7 +30,7 @@ struct Args {
     source_encoding: Option<String>,
 
     /// ZIP files to process
-    files: Vec<String>,
+    files: Vec<PathBuf>,
 }
 
 fn convert_encoding(
@@ -133,18 +133,18 @@ fn string_to_encoding(encoding_name: &str) -> Result<&'static Encoding> {
 }
 
 fn fix_cyrillic_filenames(
-    zipfile: &str,
+    zipfile: &Path,
     dry_run: bool,
     source_encoding: Option<&'static Encoding>,
     verbose: u8,
 ) -> Result<()> {
-    let file = File::open(zipfile).context(format!("Failed to open {}", zipfile))?;
+    let file = File::open(zipfile).context(format!("Failed to open {}", zipfile.display()))?;
     let mut archive = ZipArchive::new(file).context("Failed to read ZIP archive")?;
 
     let file_count = archive.len();
     println!(
         "{} contains {} file{}",
-        zipfile,
+        zipfile.display(),
         file_count,
         if file_count == 1 { "" } else { "s" }
     );
@@ -208,10 +208,8 @@ fn fix_cyrillic_filenames(
         }
     } else {
         // For actual modification, we need to create a new archive
-        let zipfile_path = Path::new(zipfile);
-        let temp_file =
-            NamedTempFile::new_in(zipfile_path.parent().unwrap_or_else(|| Path::new(".")))
-                .context("Failed to create temporary file")?;
+        let temp_file = NamedTempFile::new_in(zipfile.parent().unwrap_or_else(|| Path::new(".")))
+            .context("Failed to create temporary file")?;
         let mut zip_writer = ZipWriter::new(&temp_file);
 
         for i in 0..file_count {
@@ -350,13 +348,9 @@ fn main() -> Result<()> {
     };
 
     for zipfile in &args.files {
-        if let Err(e) = fix_cyrillic_filenames(
-            zipfile,
-            args.dry_run,
-            source_encoding,
-            args.verbose,
-        ) {
-            eprintln!("Error processing {}: {}", zipfile, e);
+        if let Err(e) = fix_cyrillic_filenames(zipfile, args.dry_run, source_encoding, args.verbose)
+        {
+            eprintln!("Error processing {}: {}", zipfile.display(), e);
             std::process::exit(1);
         }
     }
