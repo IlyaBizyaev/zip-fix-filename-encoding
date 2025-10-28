@@ -1,14 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-set -e
-set -u
-
-RUNZIP=${RUNZIP=../src/runzip}
+set -eux
 
 rm -rf processed
 cp -r originals processed
 
-${RUNZIP} -vv processed/*.zip
+cargo run --release -- -vv processed/*.zip
 
 # zipdetails processed/windows-archive.zip
 unzip -d processed/windows processed/windows-archive.zip || :

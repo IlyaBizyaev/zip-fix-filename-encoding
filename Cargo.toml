@@ -1,0 +1,20 @@
+[package]
+name = "runzip"
+version = "2.0.0"
+authors = ["Lev Walkin <vlm@lionet.info>", "Ilya Bizyaev <me@ilyabiz.com>"]
+license = "BSD-2-Clause"
+description = "Convert filenames inside ZIP archives from older Russian encodings to UTF-8"
+edition = "2021"
+
+[[bin]]
+name = "runzip"
+path = "src/main.rs"
+
+[dependencies]
+zip = "6.0"
+encoding_rs = "0.8"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"

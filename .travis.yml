@@ -1,6 +1,0 @@
-language: c
-sudo: false
-compiler:
-  - gcc
-  - clang
-script: autoreconf -iv && ./configure LDFLAGS=-L/usr/local/lib && make check

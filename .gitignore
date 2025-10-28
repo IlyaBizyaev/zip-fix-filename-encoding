@@ -1,27 +1,10 @@
 # Editor swaps
 *.swp
 *~
-.deps
-*.o
-*.la
-*.lo
-*.log
-*.trs
 
-libzip-0.7.1/*
+# Rust build artifacts
+target/
+Cargo.lock
 
-config/
-autom4te.cache
-aclocal.m4
-config.h.in
-configure
-config.log
-config.status
-libtool
-stamp-h1
-config.h
-Makefile
-Makefile.in
-
-runzip
-runzip-*.gz
+# Test artifacts
+tests/processed/
