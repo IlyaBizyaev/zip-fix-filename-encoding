@@ -1,7 +1,9 @@
+#![warn(clippy::pedantic)]
+
 use anyhow::{Context, Result, anyhow};
 use chardetng::EncodingDetector;
 use clap::Parser;
-use encoding_rs::*;
+use encoding_rs::{Encoding, IBM866, KOI8_R, KOI8_U, UTF_8, WINDOWS_1251};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -119,17 +121,154 @@ fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static Encoding {
     }
 }
 
-/// Convert a string encoding name to the corresponding encoding_rs Encoding
+/// Convert a string encoding name to the corresponding `encoding_rs` Encoding
 fn string_to_encoding(encoding_name: &str) -> Result<&'static Encoding> {
     match encoding_name.to_lowercase().as_str() {
-        "utf-8" => Ok(UTF_8),
-        "utf-8-mac" => Ok(UTF_8), // Treat UTF-8-MAC as UTF-8 for simplicity
+        "utf-8" | "utf-8-mac" => Ok(UTF_8), // Treat UTF-8-MAC as UTF-8 for simplicity
         "windows-1251" => Ok(WINDOWS_1251),
         "cp866" => Ok(IBM866),
         "koi8-r" => Ok(KOI8_R),
         "koi8-u" => Ok(KOI8_U),
-        _ => Err(anyhow!("Unsupported encoding: {}", encoding_name)),
+        _ => Err(anyhow!("Unsupported encoding: {encoding_name}")),
     }
+}
+
+fn process_file_dry_run<R: Read>(
+    file_entry: &zip::read::ZipFile<R>,
+    source_encoding: Option<&'static Encoding>,
+    verbose: u8,
+) {
+    let filename_bytes = file_entry.name_raw();
+    let filename_display = String::from_utf8_lossy(filename_bytes);
+
+    if verbose >= 2 {
+        println!("Raw bytes for '{filename_display}': {filename_bytes:02x?}");
+    }
+
+    // Check if we should process this file (skip if EFS flag indicates UTF-8)
+    if !should_check_encoding(file_entry) {
+        println!("  {filename_display}: OK (already UTF-8)");
+        return;
+    }
+
+    let detected_encoding =
+        source_encoding.unwrap_or_else(|| detect_cyrillic_encoding(filename_bytes, verbose));
+
+    if detected_encoding == UTF_8 {
+        println!("  {filename_display}: OK");
+    } else {
+        if verbose >= 1 {
+            println!(
+                "  Converting \"{filename_display}\" ({} -> UTF-8)",
+                detected_encoding.name()
+            );
+        }
+
+        match convert_encoding(filename_bytes, detected_encoding, UTF_8) {
+            Ok(new_name_bytes) => {
+                let new_name = String::from_utf8_lossy(&new_name_bytes);
+                if filename_bytes.len() == new_name_bytes.len() && filename_bytes == new_name_bytes
+                {
+                    println!("  {filename_display}: OK");
+                } else {
+                    println!(
+                        "  {new_name}: WOULD FIX ({} -> UTF-8)",
+                        detected_encoding.name()
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  Failed to recode \"{filename_display}\": {e}");
+            }
+        }
+    }
+}
+
+fn copy_file_to_archive<R: Read, W: Write + std::io::Seek>(
+    mut file_entry: zip::read::ZipFile<R>,
+    zip_writer: &mut ZipWriter<W>,
+    new_filename_bytes: &[u8],
+) -> Result<()> {
+    let mut options = FileOptions::<()>::default().compression_method(file_entry.compression());
+
+    // Set proper permissions for directories
+    if let Some(perms) = file_entry.unix_mode() {
+        options = options.unix_permissions(perms);
+    } else if new_filename_bytes.ends_with(b"/") {
+        // Default directory permissions: 755 (rwxr-xr-x)
+        options = options.unix_permissions(0o755);
+    }
+
+    let new_filename = String::from_utf8_lossy(new_filename_bytes);
+    zip_writer
+        .start_file(&new_filename, options)
+        .context("Failed to start file in new archive")?;
+
+    let mut buffer = Vec::new();
+    file_entry
+        .read_to_end(&mut buffer)
+        .context("Failed to read file contents")?;
+    zip_writer
+        .write_all(&buffer)
+        .context("Failed to write file contents")?;
+
+    Ok(())
+}
+
+fn process_file_write<R: Read, W: Write + std::io::Seek>(
+    file_entry: zip::read::ZipFile<R>,
+    zip_writer: &mut ZipWriter<W>,
+    source_encoding: Option<&'static Encoding>,
+    verbose: u8,
+) -> Result<()> {
+    let filename_bytes = file_entry.name_raw().to_vec();
+    let filename_display = String::from_utf8_lossy(&filename_bytes);
+
+    // Check if we should process this file (skip if EFS flag indicates UTF-8)
+    if !should_check_encoding(&file_entry) {
+        println!("  {filename_display}: OK (already UTF-8)");
+        copy_file_to_archive(file_entry, zip_writer, &filename_bytes)?;
+        return Ok(());
+    }
+
+    let detected_encoding =
+        source_encoding.unwrap_or_else(|| detect_cyrillic_encoding(&filename_bytes, verbose));
+
+    let new_filename_bytes = if detected_encoding == UTF_8 {
+        println!("  {filename_display}: OK");
+        filename_bytes.clone()
+    } else {
+        if verbose >= 1 {
+            println!(
+                "  Converting \"{filename_display}\" ({} -> UTF-8)",
+                detected_encoding.name()
+            );
+        }
+
+        match convert_encoding(&filename_bytes, detected_encoding, UTF_8) {
+            Ok(new_name_bytes) => {
+                let new_name = String::from_utf8_lossy(&new_name_bytes);
+                if filename_bytes.len() == new_name_bytes.len() && filename_bytes == new_name_bytes
+                {
+                    println!("  {filename_display}: OK");
+                    filename_bytes.clone()
+                } else {
+                    println!(
+                        "  {new_name}: FIXED ({} -> UTF-8)",
+                        detected_encoding.name()
+                    );
+                    new_name_bytes
+                }
+            }
+            Err(e) => {
+                println!("  Failed to recode \"{filename_display}\": {e}");
+                filename_bytes.clone()
+            }
+        }
+    };
+
+    copy_file_to_archive(file_entry, zip_writer, &new_filename_bytes)?;
+    Ok(())
 }
 
 fn fix_cyrillic_filenames(
@@ -155,56 +294,7 @@ fn fix_cyrillic_filenames(
             let file_entry = archive
                 .by_index_raw(i)
                 .context("Failed to read file entry")?;
-            let filename_bytes = file_entry.name_raw();
-            let filename_display = String::from_utf8_lossy(filename_bytes);
-
-            if verbose >= 2 {
-                println!(
-                    "Raw bytes for '{}': {:02x?}",
-                    filename_display, filename_bytes
-                );
-            }
-
-            // Check if we should process this file (skip if EFS flag indicates UTF-8)
-            if !should_check_encoding(&file_entry) {
-                println!("  {}: OK (already UTF-8)", filename_display);
-                continue;
-            }
-
-            let detected_encoding = source_encoding
-                .unwrap_or_else(|| detect_cyrillic_encoding(filename_bytes, verbose));
-
-            if detected_encoding == UTF_8 {
-                println!("  {}: OK", filename_display);
-            } else {
-                if verbose >= 1 {
-                    println!(
-                        "  Converting \"{}\" ({} -> UTF-8)",
-                        filename_display,
-                        detected_encoding.name()
-                    );
-                }
-
-                match convert_encoding(filename_bytes, detected_encoding, UTF_8) {
-                    Ok(new_name_bytes) => {
-                        let new_name = String::from_utf8_lossy(&new_name_bytes);
-                        if filename_bytes.len() == new_name_bytes.len()
-                            && filename_bytes == new_name_bytes
-                        {
-                            println!("  {}: OK", filename_display);
-                        } else {
-                            println!(
-                                "  {}: WOULD FIX ({} -> UTF-8)",
-                                new_name,
-                                detected_encoding.name()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        println!("  Failed to recode \"{}\": {}", filename_display, e);
-                    }
-                }
-            }
+            process_file_dry_run(&file_entry, source_encoding, verbose);
         }
     } else {
         // For actual modification, we need to create a new archive
@@ -213,104 +303,8 @@ fn fix_cyrillic_filenames(
         let mut zip_writer = ZipWriter::new(&temp_file);
 
         for i in 0..file_count {
-            let mut file_entry = archive.by_index(i).context("Failed to read file entry")?;
-            let filename_bytes = file_entry.name_raw().to_vec();
-            let filename_display = String::from_utf8_lossy(&filename_bytes);
-
-            // Check if we should process this file (skip if EFS flag indicates UTF-8)
-            if !should_check_encoding(&file_entry) {
-                println!("  {}: OK (already UTF-8)", filename_display);
-
-                // Copy file with original name
-                let mut options =
-                    FileOptions::<()>::default().compression_method(file_entry.compression());
-
-                // Set proper permissions for directories
-                if let Some(perms) = file_entry.unix_mode() {
-                    options = options.unix_permissions(perms);
-                } else if filename_bytes.ends_with(b"/") {
-                    // Default directory permissions: 755 (rwxr-xr-x)
-                    options = options.unix_permissions(0o755);
-                }
-
-                let filename = String::from_utf8_lossy(&filename_bytes);
-                zip_writer
-                    .start_file(&filename, options)
-                    .context("Failed to start file in new archive")?;
-
-                let mut buffer = Vec::new();
-                file_entry
-                    .read_to_end(&mut buffer)
-                    .context("Failed to read file contents")?;
-                zip_writer
-                    .write_all(&buffer)
-                    .context("Failed to write file contents")?;
-                continue;
-            }
-
-            let detected_encoding = source_encoding
-                .unwrap_or_else(|| detect_cyrillic_encoding(&filename_bytes, verbose));
-
-            let new_filename_bytes = if detected_encoding == UTF_8 {
-                println!("  {}: OK", filename_display);
-                filename_bytes.clone()
-            } else {
-                if verbose >= 1 {
-                    println!(
-                        "  Converting \"{}\" ({} -> UTF-8)",
-                        filename_display,
-                        detected_encoding.name()
-                    );
-                }
-
-                match convert_encoding(&filename_bytes, detected_encoding, UTF_8) {
-                    Ok(new_name_bytes) => {
-                        let new_name = String::from_utf8_lossy(&new_name_bytes);
-                        if filename_bytes.len() == new_name_bytes.len()
-                            && filename_bytes == new_name_bytes
-                        {
-                            println!("  {}: OK", filename_display);
-                            filename_bytes.clone()
-                        } else {
-                            println!(
-                                "  {}: FIXED ({} -> UTF-8)",
-                                new_name,
-                                detected_encoding.name()
-                            );
-                            new_name_bytes
-                        }
-                    }
-                    Err(e) => {
-                        println!("  Failed to recode \"{}\": {}", filename_display, e);
-                        filename_bytes.clone()
-                    }
-                }
-            };
-
-            // Copy file with potentially new name
-            let mut options =
-                FileOptions::<()>::default().compression_method(file_entry.compression());
-
-            // Set proper permissions for directories
-            if let Some(perms) = file_entry.unix_mode() {
-                options = options.unix_permissions(perms);
-            } else if new_filename_bytes.ends_with(b"/") {
-                // Default directory permissions: 755 (rwxr-xr-x)
-                options = options.unix_permissions(0o755);
-            }
-
-            let new_filename = String::from_utf8_lossy(&new_filename_bytes);
-            zip_writer
-                .start_file(&new_filename, options)
-                .context("Failed to start file in new archive")?;
-
-            let mut buffer = Vec::new();
-            file_entry
-                .read_to_end(&mut buffer)
-                .context("Failed to read file contents")?;
-            zip_writer
-                .write_all(&buffer)
-                .context("Failed to write file contents")?;
+            let file_entry = archive.by_index(i).context("Failed to read file entry")?;
+            process_file_write(file_entry, &mut zip_writer, source_encoding, verbose)?;
         }
 
         zip_writer
@@ -327,7 +321,7 @@ fn fix_cyrillic_filenames(
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() {
     let args = Args::parse();
 
     if args.files.is_empty() {
@@ -336,12 +330,11 @@ fn main() -> Result<()> {
     }
 
     let source_encoding = if let Some(ref source) = args.source_encoding {
-        match string_to_encoding(source) {
-            Ok(encoding) => Some(encoding),
-            Err(_) => {
-                eprintln!("Error: Invalid source encoding: {}", source);
-                std::process::exit(1);
-            }
+        if let Ok(encoding) = string_to_encoding(source) {
+            Some(encoding)
+        } else {
+            eprintln!("Error: Invalid source encoding: {source}");
+            std::process::exit(1);
         }
     } else {
         None
@@ -350,10 +343,8 @@ fn main() -> Result<()> {
     for zipfile in &args.files {
         if let Err(e) = fix_cyrillic_filenames(zipfile, args.dry_run, source_encoding, args.verbose)
         {
-            eprintln!("Error processing {}: {}", zipfile.display(), e);
+            eprintln!("Error processing {}: {e}", zipfile.display());
             std::process::exit(1);
         }
     }
-
-    Ok(())
 }
