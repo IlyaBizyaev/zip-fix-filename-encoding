@@ -40,42 +40,27 @@ struct Args {
     files: Vec<String>,
 }
 
-fn convert_encoding(text: &[u8], from_encoding: &str, to_encoding: &str) -> Result<Vec<u8>> {
+fn convert_encoding(
+    text: &[u8],
+    from_encoding: &'static Encoding,
+    to_encoding: &'static Encoding,
+) -> Result<Vec<u8>> {
     // First, decode from source encoding
-    let source_encoding = match from_encoding.to_lowercase().as_str() {
-        "utf-8" => UTF_8,
-        "utf-8-mac" => UTF_8, // Treat UTF-8-MAC as UTF-8 for simplicity
-        "windows-1251" => WINDOWS_1251,
-        "cp866" => IBM866,
-        "koi8-r" => KOI8_R,
-        "koi8-u" => KOI8_U,
-        _ => return Err(anyhow!("Unsupported source encoding: {}", from_encoding)),
-    };
-
-    let (decoded, _, had_errors) = source_encoding.decode(text);
+    let (decoded, _, had_errors) = from_encoding.decode(text);
     if had_errors {
-        return Err(anyhow!("Failed to decode from {}", from_encoding));
+        return Err(anyhow!("Failed to decode from {}", from_encoding.name()));
     }
 
     // Then encode to target encoding
-    let target_encoding_obj = match to_encoding.to_lowercase().as_str() {
-        "utf-8" => UTF_8,
-        "windows-1251" => WINDOWS_1251,
-        "cp866" => IBM866,
-        "koi8-r" => KOI8_R,
-        "koi8-u" => KOI8_U,
-        _ => return Err(anyhow!("Unsupported target encoding: {}", to_encoding)),
-    };
-
-    let (encoded, _, had_errors) = target_encoding_obj.encode(&decoded);
+    let (encoded, _, had_errors) = to_encoding.encode(&decoded);
     if had_errors {
-        return Err(anyhow!("Failed to encode to {}", to_encoding));
+        return Err(anyhow!("Failed to encode to {}", to_encoding.name()));
     }
 
     Ok(encoded.into_owned())
 }
 
-fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static str {
+fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static Encoding {
     // First, check if the filename is already valid UTF-8 with Cyrillic content
     if let Ok(utf8_str) = std::str::from_utf8(filename) {
         // Check if it contains Cyrillic characters
@@ -89,7 +74,7 @@ fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static str {
                 println!("For filename detection:");
                 println!("\tAlready valid UTF-8 with Cyrillic content or ASCII");
             }
-            return "UTF-8";
+            return UTF_8;
         }
     }
 
@@ -103,28 +88,41 @@ fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static str {
         println!("\tchardetng detected: {}", detected_encoding.name());
     }
 
-    // Map detected encoding to our supported set
-    match detected_encoding.name() {
-        "UTF-8" => "UTF-8",
-        "windows-1251" => "windows-1251",
-        "IBM866" => "CP866",
-        "KOI8-R" => "KOI8-R",
-        "KOI8-U" => "KOI8-U",
+    // Check if the detected encoding is one of our supported encodings
+    if detected_encoding == UTF_8
+        || detected_encoding == WINDOWS_1251
+        || detected_encoding == IBM866
+        || detected_encoding == KOI8_R
+        || detected_encoding == KOI8_U
+    {
+        detected_encoding
+    } else {
         // For unsupported encodings, default to UTF-8 (maintains original behavior)
-        _ => {
-            if verbose >= 1 {
-                println!("\tUnsupported encoding detected, defaulting to UTF-8");
-            }
-            "UTF-8"
+        if verbose >= 1 {
+            println!("\tUnsupported encoding detected, defaulting to UTF-8");
         }
+        UTF_8
+    }
+}
+
+/// Convert a string encoding name to the corresponding encoding_rs Encoding
+fn string_to_encoding(encoding_name: &str) -> Result<&'static Encoding> {
+    match encoding_name.to_lowercase().as_str() {
+        "utf-8" => Ok(UTF_8),
+        "utf-8-mac" => Ok(UTF_8), // Treat UTF-8-MAC as UTF-8 for simplicity
+        "windows-1251" => Ok(WINDOWS_1251),
+        "cp866" => Ok(IBM866),
+        "koi8-r" => Ok(KOI8_R),
+        "koi8-u" => Ok(KOI8_U),
+        _ => Err(anyhow!("Unsupported encoding: {}", encoding_name)),
     }
 }
 
 fn fix_cyrillic_filenames(
     zipfile: &str,
     dry_run: bool,
-    source_encoding: Option<&str>,
-    target_encoding: &str,
+    source_encoding: Option<&'static Encoding>,
+    target_encoding: &'static Encoding,
     verbose: u8,
 ) -> Result<()> {
     let file = File::open(zipfile).context(format!("Failed to open {}", zipfile))?;
@@ -157,13 +155,15 @@ fn fix_cyrillic_filenames(
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(filename_bytes, verbose));
 
-            if detected_encoding.eq_ignore_ascii_case(target_encoding) {
+            if detected_encoding == target_encoding {
                 println!("  {}: OK", filename_display);
             } else {
                 if verbose >= 1 {
                     println!(
                         "  Converting \"{}\" ({} -> {})",
-                        filename_display, detected_encoding, target_encoding
+                        filename_display,
+                        detected_encoding.name(),
+                        target_encoding.name()
                     );
                 }
 
@@ -177,7 +177,9 @@ fn fix_cyrillic_filenames(
                         } else {
                             println!(
                                 "  {}: WOULD FIX ({} -> {})",
-                                new_name, detected_encoding, target_encoding
+                                new_name,
+                                detected_encoding.name(),
+                                target_encoding.name()
                             );
                         }
                     }
@@ -201,14 +203,16 @@ fn fix_cyrillic_filenames(
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(&filename_bytes, verbose));
 
-            let new_filename_bytes = if detected_encoding.eq_ignore_ascii_case(target_encoding) {
+            let new_filename_bytes = if detected_encoding == target_encoding {
                 println!("  {}: OK", filename_display);
                 filename_bytes.clone()
             } else {
                 if verbose >= 1 {
                     println!(
                         "  Converting \"{}\" ({} -> {})",
-                        filename_display, detected_encoding, target_encoding
+                        filename_display,
+                        detected_encoding.name(),
+                        target_encoding.name()
                     );
                 }
 
@@ -223,7 +227,9 @@ fn fix_cyrillic_filenames(
                         } else {
                             println!(
                                 "  {}: FIXED ({} -> {})",
-                                new_name, detected_encoding, target_encoding
+                                new_name,
+                                detected_encoding.name(),
+                                target_encoding.name()
                             );
                             new_name_bytes
                         }
@@ -287,26 +293,33 @@ fn main() -> Result<()> {
         args.target_encoding = "cp866".to_string();
     }
 
-    // Validate encodings
-    let valid_encodings = ["utf-8", "windows-1251", "cp866", "koi8-r", "koi8-u"];
-    if !valid_encodings.contains(&args.target_encoding.to_lowercase().as_str()) {
-        eprintln!("Error: Invalid target encoding: {}", args.target_encoding);
-        std::process::exit(1);
-    }
-
-    if let Some(ref source) = args.source_encoding {
-        if !valid_encodings.contains(&source.to_lowercase().as_str()) {
-            eprintln!("Error: Invalid source encoding: {}", source);
+    // Convert and validate encodings
+    let target_encoding = match string_to_encoding(&args.target_encoding) {
+        Ok(encoding) => encoding,
+        Err(e) => {
+            eprintln!("Error: Invalid target encoding: {}", e);
             std::process::exit(1);
         }
-    }
+    };
+
+    let source_encoding = if let Some(ref source) = args.source_encoding {
+        match string_to_encoding(source) {
+            Ok(encoding) => Some(encoding),
+            Err(e) => {
+                eprintln!("Error: Invalid source encoding: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     for zipfile in &args.files {
         if let Err(e) = fix_cyrillic_filenames(
             zipfile,
             args.dry_run,
-            args.source_encoding.as_deref(),
-            &args.target_encoding,
+            source_encoding,
+            target_encoding,
             args.verbose,
         ) {
             eprintln!("Error processing {}: {}", zipfile, e);
