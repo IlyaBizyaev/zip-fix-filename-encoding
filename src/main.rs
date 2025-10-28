@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 use zip::write::FileOptions;
-use zip::{ZipArchive, ZipWriter};
+use zip::{HasZipMetadata, ZipArchive, ZipWriter};
 
 #[derive(Parser)]
 #[command(
@@ -62,18 +62,45 @@ fn convert_encoding(
     Ok(encoded.into_owned())
 }
 
-fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static Encoding {
-    // First, check if the filename is already valid UTF-8 with Cyrillic content
-    if let Ok(utf8_str) = std::str::from_utf8(filename)
-        && (utf8_str
+/// Check if we should attempt encoding detection for this ZIP file entry
+fn should_check_encoding<R: Read>(zip_file: &zip::read::ZipFile<R>, target_encoding: &'static Encoding) -> bool {
+    // If the EFS flag indicates UTF-8 and we're targeting UTF-8, we don't need to recode
+    if zip_file.get_metadata().is_utf8 && target_encoding == UTF_8 {
+        false
+    } else {
+        true
+    }
+}
+
+/// Check if filename is valid UTF-8 with Cyrillic content
+fn is_valid_utf8_cyrillic(filename: &[u8]) -> bool {
+    if let Ok(utf8_str) = std::str::from_utf8(filename) {
+        // Only consider it valid UTF-8 if it contains Cyrillic characters
+        utf8_str
             .chars()
             .any(|c| matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}'))
-            || !utf8_str.chars().any(|c| c as u32 > 127))
-    {
-        // Either has Cyrillic or is pure ASCII - both are fine as UTF-8
+    } else {
+        false
+    }
+}
+
+fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static Encoding {
+    // First, check if the filename is already valid UTF-8 with Cyrillic content
+    if is_valid_utf8_cyrillic(filename) {
         if verbose >= 1 {
             println!("For filename detection:");
-            println!("\tAlready valid UTF-8 with Cyrillic content or ASCII");
+            println!("\tAlready valid UTF-8 with Cyrillic content");
+        }
+        return UTF_8;
+    }
+
+    // Check for pure ASCII (which is also valid UTF-8)
+    if let Ok(utf8_str) = std::str::from_utf8(filename)
+        && !utf8_str.chars().any(|c| c as u32 > 127)
+    {
+        if verbose >= 1 {
+            println!("For filename detection:");
+            println!("\tPure ASCII, treating as UTF-8");
         }
         return UTF_8;
     }
@@ -152,6 +179,12 @@ fn fix_cyrillic_filenames(
                 );
             }
 
+            // Check if we should process this file (skip if EFS flag indicates UTF-8 and targeting UTF-8)
+            if !should_check_encoding(&file_entry, target_encoding) {
+                println!("  {}: OK (EFS flag indicates UTF-8, targeting UTF-8)", filename_display);
+                continue;
+            }
+
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(filename_bytes, verbose));
 
@@ -201,6 +234,37 @@ fn fix_cyrillic_filenames(
             let mut file_entry = archive.by_index(i).context("Failed to read file entry")?;
             let filename_bytes = file_entry.name_raw().to_vec();
             let filename_display = String::from_utf8_lossy(&filename_bytes);
+
+            // Check if we should process this file (skip if EFS flag indicates UTF-8 and targeting UTF-8)
+            if !should_check_encoding(&file_entry, target_encoding) {
+                println!("  {}: OK (EFS flag indicates UTF-8, targeting UTF-8)", filename_display);
+
+                // Copy file with original name
+                let mut options =
+                    FileOptions::<()>::default().compression_method(file_entry.compression());
+
+                // Set proper permissions for directories
+                if let Some(perms) = file_entry.unix_mode() {
+                    options = options.unix_permissions(perms);
+                } else if filename_bytes.ends_with(b"/") {
+                    // Default directory permissions: 755 (rwxr-xr-x)
+                    options = options.unix_permissions(0o755);
+                }
+
+                let filename = String::from_utf8_lossy(&filename_bytes);
+                zip_writer
+                    .start_file(&filename, options)
+                    .context("Failed to start file in new archive")?;
+
+                let mut buffer = Vec::new();
+                file_entry
+                    .read_to_end(&mut buffer)
+                    .context("Failed to read file contents")?;
+                zip_writer
+                    .write_all(&buffer)
+                    .context("Failed to write file contents")?;
+                continue;
+            }
 
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(&filename_bytes, verbose));
