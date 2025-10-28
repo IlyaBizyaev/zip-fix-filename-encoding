@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use chardetng::EncodingDetector;
 use clap::Parser;
 use encoding_rs::*;
 use std::fs::File;
@@ -37,100 +38,6 @@ struct Args {
 
     /// ZIP files to process
     files: Vec<String>,
-}
-
-#[derive(Debug)]
-struct CharFrequencies {
-    encoding: &'static str,
-    characters_seen: usize,
-    frequency: [f64; 256],
-}
-
-impl CharFrequencies {
-    fn new(encoding: &'static str) -> Self {
-        Self {
-            encoding,
-            characters_seen: 0,
-            frequency: [0.0; 256],
-        }
-    }
-
-    fn add_character(&mut self, ch: u8) {
-        self.frequency[ch as usize] += 1.0;
-        self.characters_seen += 1;
-    }
-
-    fn cyrillic_factor(&self) -> f64 {
-        // Cyrillic character frequency scale based on Russian letter frequencies
-        // From http://www.sttmedia.com/characterfrequency-cyrillic
-        let mut scale = [0.0; 256];
-
-        // ASCII characters (space to ~) get small positive weight
-        for item in scale.iter_mut().take(126 + 1).skip(32) {
-            *item = 0.001;
-        }
-
-        // KOI8-R/KOI8-U Cyrillic characters with their frequencies
-        scale[207] = 11.07; // О
-        scale[197] = 8.50; // Е
-        scale[193] = 7.50; // А
-        scale[201] = 7.09; // И
-        scale[206] = 6.70; // Н
-        scale[212] = 5.97; // Т
-        scale[211] = 4.97; // С
-        scale[204] = 4.96; // Л
-        scale[215] = 4.33; // В
-        scale[210] = 4.33; // Р
-        scale[203] = 3.30; // К
-        scale[237] = 3.10; // М
-        scale[196] = 3.09; // Д
-        scale[208] = 2.47; // П
-        scale[217] = 2.36; // Ы
-        scale[213] = 2.22; // У
-        scale[194] = 2.01; // Б
-        scale[209] = 1.96; // Я
-        scale[216] = 1.84; // Ь
-        scale[199] = 1.72; // Г
-        scale[218] = 1.48; // З
-        scale[222] = 1.40; // Ч
-        scale[202] = 1.21; // Й
-        scale[214] = 1.01; // Ж
-        scale[200] = 0.95; // Х
-        scale[219] = 0.72; // Ш
-        scale[192] = 0.47; // Ю
-        scale[195] = 0.39; // Ц
-        scale[220] = 0.35; // Э
-        scale[221] = 0.30; // Щ
-        scale[198] = 0.21; // Ф
-        scale[163] = 0.20; // Ё
-        scale[223] = 0.02; // Ъ
-
-        // Ukrainian letters
-        scale[164] = 0.3; // Є
-        scale[166] = 5.0; // І
-        scale[167] = 0.3; // Ї
-        scale[173] = 0.01; // Ґ
-
-        let mut factor = 0.0;
-        for i in 0..256 {
-            // Convert lowercase KOI8-R/KOI8-U character
-            let ch = if i >= 225 { i - 32 } else { i };
-            let ch = match ch {
-                179 => ch - 16,                   // ё
-                180 | 182 | 183 | 189 => ch - 16, // є, і, ї, ґ
-                _ => ch,
-            };
-
-            let f = if self.frequency[i] == 0.0 {
-                -10.0
-            } else {
-                self.frequency[i]
-            };
-            factor += f * scale[ch];
-        }
-
-        factor
-    }
 }
 
 fn convert_encoding(text: &[u8], from_encoding: &str, to_encoding: &str) -> Result<Vec<u8>> {
@@ -186,67 +93,30 @@ fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static str {
         }
     }
 
-    // If not valid UTF-8 or no Cyrillic, try to decode from legacy encodings
-    let try_encodings = ["Windows-1251", "CP866", "KOI8-R", "KOI8-U"];
-    let mut frequencies = Vec::new();
-
-    for &encoding in &try_encodings {
-        let mut freq = CharFrequencies::new(encoding);
-
-        // Try to decode from this encoding to UTF-8
-        if let Ok(utf8_bytes) = convert_encoding(filename, encoding, "UTF-8") {
-            if let Ok(utf8_str) = std::str::from_utf8(&utf8_bytes) {
-                // Check if the result contains Cyrillic
-                let has_cyrillic = utf8_str
-                    .chars()
-                    .any(|c| matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}'));
-
-                if has_cyrillic {
-                    // Convert to KOI8-U for frequency analysis
-                    if let Ok(koi8u_bytes) = convert_encoding(&utf8_bytes, "UTF-8", "KOI8-U") {
-                        for &ch in &koi8u_bytes {
-                            freq.add_character(ch);
-                        }
-                    }
-                }
-            }
-        }
-
-        frequencies.push(freq);
-    }
-
-    // Sort by cyrillic factor (highest first) and character count
-    frequencies.sort_by(|a, b| {
-        if a.characters_seen > 0 && a.characters_seen < b.characters_seen {
-            std::cmp::Ordering::Less
-        } else if b.characters_seen > 0 && a.characters_seen > b.characters_seen {
-            std::cmp::Ordering::Greater
-        } else {
-            let factor_a = a.cyrillic_factor();
-            let factor_b = b.cyrillic_factor();
-            factor_b
-                .partial_cmp(&factor_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
+    // Use chardetng for encoding detection
+    let mut detector = EncodingDetector::new();
+    detector.feed(filename, true);
+    let detected_encoding = detector.guess(None, true);
 
     if verbose >= 1 {
         println!("For filename detection:");
-        for freq in &frequencies {
-            println!(
-                "\t{} factor {:.2} ({})",
-                freq.encoding,
-                freq.cyrillic_factor(),
-                freq.characters_seen
-            );
-        }
+        println!("\tchardetng detected: {}", detected_encoding.name());
     }
 
-    // If no encoding produced good Cyrillic, default to UTF-8
-    if frequencies.is_empty() || frequencies[0].characters_seen == 0 {
-        "UTF-8"
-    } else {
-        frequencies[0].encoding
+    // Map detected encoding to our supported set
+    match detected_encoding.name() {
+        "UTF-8" => "UTF-8",
+        "windows-1251" => "windows-1251",
+        "IBM866" => "CP866",
+        "KOI8-R" => "KOI8-R",
+        "KOI8-U" => "KOI8-U",
+        // For unsupported encodings, default to UTF-8 (maintains original behavior)
+        _ => {
+            if verbose >= 1 {
+                println!("\tUnsupported encoding detected, defaulting to UTF-8");
+            }
+            "UTF-8"
+        }
     }
 }
 
