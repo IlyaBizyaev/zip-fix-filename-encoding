@@ -303,7 +303,7 @@ fn fix_cyrillic_filenames(
         let mut zip_writer = ZipWriter::new(&temp_file);
 
         for i in 0..file_count {
-            let file_entry = archive.by_index(i).context("Failed to read file entry")?;
+            let file_entry = archive.by_index_raw(i).context("Failed to read file entry")?;
             process_file_write(file_entry, &mut zip_writer, source_encoding, verbose)?;
         }
 
