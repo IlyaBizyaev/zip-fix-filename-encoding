@@ -62,20 +62,18 @@ fn convert_encoding(
 
 fn detect_cyrillic_encoding(filename: &[u8], verbose: u8) -> &'static Encoding {
     // First, check if the filename is already valid UTF-8 with Cyrillic content
-    if let Ok(utf8_str) = std::str::from_utf8(filename) {
-        // Check if it contains Cyrillic characters
-        let has_cyrillic = utf8_str
+    if let Ok(utf8_str) = std::str::from_utf8(filename)
+        && (utf8_str
             .chars()
-            .any(|c| matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}'));
-
-        if has_cyrillic || !utf8_str.chars().any(|c| c as u32 > 127) {
-            // Either has Cyrillic or is pure ASCII - both are fine as UTF-8
-            if verbose >= 1 {
-                println!("For filename detection:");
-                println!("\tAlready valid UTF-8 with Cyrillic content or ASCII");
-            }
-            return UTF_8;
+            .any(|c| matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}'))
+            || !utf8_str.chars().any(|c| c as u32 > 127))
+    {
+        // Either has Cyrillic or is pure ASCII - both are fine as UTF-8
+        if verbose >= 1 {
+            println!("For filename detection:");
+            println!("\tAlready valid UTF-8 with Cyrillic content or ASCII");
         }
+        return UTF_8;
     }
 
     // Use chardetng for encoding detection
