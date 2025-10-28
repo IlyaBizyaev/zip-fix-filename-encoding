@@ -5,7 +5,7 @@ set -eux
 rm -rf processed
 cp -r originals processed
 
-cargo run --release -- -vv processed/*.zip
+cargo run -- -vv processed/*.zip
 
 # zipdetails processed/windows-archive.zip
 unzip -d processed/windows processed/windows-archive.zip || :
