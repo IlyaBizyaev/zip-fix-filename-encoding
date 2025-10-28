@@ -5,6 +5,7 @@
       - Enhanced Cyrillic character detection to prevent false positives.
       - Better handling of decomposed Unicode characters (like combining diacritics).
     * Fixed directory permissions handling in ZIP archives.
+    * Dropped --target and --windows options, always targeting UTF-8.
 
 1.4:    2015-Dec-21
     * Stopped using UTF-8-MAC, because it does more damage than good.

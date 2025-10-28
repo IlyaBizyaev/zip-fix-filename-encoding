@@ -14,7 +14,7 @@ use zip::{HasZipMetadata, ZipArchive, ZipWriter};
     name = "runzip",
     version = "2.0.0",
     about = "Russian filename encoding fix inside ZIP archives",
-    long_about = "Convert filenames inside ZIP archives from autodetected older Russian encodings\n(koi8-r, koi8-u, cp866, windows-1251) to UTF-8."
+    long_about = "Convert filenames inside ZIP archives from older Russian encodings\n(koi8-r, koi8-u, cp866, windows-1251) to UTF-8."
 )]
 struct Args {
     /// Dry run. Do not modify the <file.zip>
@@ -28,15 +28,6 @@ struct Args {
     /// Set source encoding. Auto-detect, if not set
     #[arg(short = 's', long = "source")]
     source_encoding: Option<String>,
-
-    /// Set target encoding. Default is UTF-8
-    #[arg(short = 't', long = "target", default_value = "utf-8")]
-    target_encoding: String,
-
-    /// Make archive readable on Windows (reverse operation)
-    /// NOTE: -w implies -t cp866 (Yes! MS-DOS!)
-    #[arg(short = 'w', long = "windows")]
-    windows_mode: bool,
 
     /// ZIP files to process
     files: Vec<String>,
@@ -63,13 +54,9 @@ fn convert_encoding(
 }
 
 /// Check if we should attempt encoding detection for this ZIP file entry
-fn should_check_encoding<R: Read>(zip_file: &zip::read::ZipFile<R>, target_encoding: &'static Encoding) -> bool {
-    // If the EFS flag indicates UTF-8 and we're targeting UTF-8, we don't need to recode
-    if zip_file.get_metadata().is_utf8 && target_encoding == UTF_8 {
-        false
-    } else {
-        true
-    }
+fn should_check_encoding<R: Read>(zip_file: &zip::read::ZipFile<R>) -> bool {
+    // If the EFS flag indicates UTF-8, we don't need to recode.
+    !zip_file.get_metadata().is_utf8
 }
 
 /// Check if filename is valid UTF-8 with Cyrillic content
@@ -149,7 +136,6 @@ fn fix_cyrillic_filenames(
     zipfile: &str,
     dry_run: bool,
     source_encoding: Option<&'static Encoding>,
-    target_encoding: &'static Encoding,
     verbose: u8,
 ) -> Result<()> {
     let file = File::open(zipfile).context(format!("Failed to open {}", zipfile))?;
@@ -179,28 +165,27 @@ fn fix_cyrillic_filenames(
                 );
             }
 
-            // Check if we should process this file (skip if EFS flag indicates UTF-8 and targeting UTF-8)
-            if !should_check_encoding(&file_entry, target_encoding) {
-                println!("  {}: OK (EFS flag indicates UTF-8, targeting UTF-8)", filename_display);
+            // Check if we should process this file (skip if EFS flag indicates UTF-8)
+            if !should_check_encoding(&file_entry) {
+                println!("  {}: OK (already UTF-8)", filename_display);
                 continue;
             }
 
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(filename_bytes, verbose));
 
-            if detected_encoding == target_encoding {
+            if detected_encoding == UTF_8 {
                 println!("  {}: OK", filename_display);
             } else {
                 if verbose >= 1 {
                     println!(
-                        "  Converting \"{}\" ({} -> {})",
+                        "  Converting \"{}\" ({} -> UTF-8)",
                         filename_display,
-                        detected_encoding.name(),
-                        target_encoding.name()
+                        detected_encoding.name()
                     );
                 }
 
-                match convert_encoding(filename_bytes, detected_encoding, target_encoding) {
+                match convert_encoding(filename_bytes, detected_encoding, UTF_8) {
                     Ok(new_name_bytes) => {
                         let new_name = String::from_utf8_lossy(&new_name_bytes);
                         if filename_bytes.len() == new_name_bytes.len()
@@ -209,10 +194,9 @@ fn fix_cyrillic_filenames(
                             println!("  {}: OK", filename_display);
                         } else {
                             println!(
-                                "  {}: WOULD FIX ({} -> {})",
+                                "  {}: WOULD FIX ({} -> UTF-8)",
                                 new_name,
-                                detected_encoding.name(),
-                                target_encoding.name()
+                                detected_encoding.name()
                             );
                         }
                     }
@@ -235,9 +219,9 @@ fn fix_cyrillic_filenames(
             let filename_bytes = file_entry.name_raw().to_vec();
             let filename_display = String::from_utf8_lossy(&filename_bytes);
 
-            // Check if we should process this file (skip if EFS flag indicates UTF-8 and targeting UTF-8)
-            if !should_check_encoding(&file_entry, target_encoding) {
-                println!("  {}: OK (EFS flag indicates UTF-8, targeting UTF-8)", filename_display);
+            // Check if we should process this file (skip if EFS flag indicates UTF-8)
+            if !should_check_encoding(&file_entry) {
+                println!("  {}: OK (already UTF-8)", filename_display);
 
                 // Copy file with original name
                 let mut options =
@@ -269,20 +253,19 @@ fn fix_cyrillic_filenames(
             let detected_encoding = source_encoding
                 .unwrap_or_else(|| detect_cyrillic_encoding(&filename_bytes, verbose));
 
-            let new_filename_bytes = if detected_encoding == target_encoding {
+            let new_filename_bytes = if detected_encoding == UTF_8 {
                 println!("  {}: OK", filename_display);
                 filename_bytes.clone()
             } else {
                 if verbose >= 1 {
                     println!(
-                        "  Converting \"{}\" ({} -> {})",
+                        "  Converting \"{}\" ({} -> UTF-8)",
                         filename_display,
-                        detected_encoding.name(),
-                        target_encoding.name()
+                        detected_encoding.name()
                     );
                 }
 
-                match convert_encoding(&filename_bytes, detected_encoding, target_encoding) {
+                match convert_encoding(&filename_bytes, detected_encoding, UTF_8) {
                     Ok(new_name_bytes) => {
                         let new_name = String::from_utf8_lossy(&new_name_bytes);
                         if filename_bytes.len() == new_name_bytes.len()
@@ -292,10 +275,9 @@ fn fix_cyrillic_filenames(
                             filename_bytes.clone()
                         } else {
                             println!(
-                                "  {}: FIXED ({} -> {})",
+                                "  {}: FIXED ({} -> UTF-8)",
                                 new_name,
-                                detected_encoding.name(),
-                                target_encoding.name()
+                                detected_encoding.name()
                             );
                             new_name_bytes
                         }
@@ -348,32 +330,18 @@ fn fix_cyrillic_filenames(
 }
 
 fn main() -> Result<()> {
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     if args.files.is_empty() {
         eprintln!("Error: No ZIP files specified");
         std::process::exit(1);
     }
 
-    // Handle Windows mode
-    if args.windows_mode {
-        args.target_encoding = "cp866".to_string();
-    }
-
-    // Convert and validate encodings
-    let target_encoding = match string_to_encoding(&args.target_encoding) {
-        Ok(encoding) => encoding,
-        Err(e) => {
-            eprintln!("Error: Invalid target encoding: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let source_encoding = if let Some(ref source) = args.source_encoding {
         match string_to_encoding(source) {
             Ok(encoding) => Some(encoding),
-            Err(e) => {
-                eprintln!("Error: Invalid source encoding: {}", e);
+            Err(_) => {
+                eprintln!("Error: Invalid source encoding: {}", source);
                 std::process::exit(1);
             }
         }
@@ -386,7 +354,6 @@ fn main() -> Result<()> {
             zipfile,
             args.dry_run,
             source_encoding,
-            target_encoding,
             args.verbose,
         ) {
             eprintln!("Error processing {}: {}", zipfile, e);

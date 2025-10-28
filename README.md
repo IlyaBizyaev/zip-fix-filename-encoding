@@ -35,14 +35,6 @@ Or simply run directly:
     -s, --source <SOURCE_ENCODING>
             Set source encoding. Auto-detect, if not set
 
-    -t, --target <TARGET_ENCODING>
-            Set target encoding. Default is UTF-8
-            
-            [default: utf-8]
-
-    -w, --windows
-            Make archive readable on Windows (reverse operation) NOTE: -w implies -t cp866 (Yes! MS-DOS!)
-
     -h, --help
             Print help (see a summary with '-h')
 
