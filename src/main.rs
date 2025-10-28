@@ -66,8 +66,8 @@ impl CharFrequencies {
         let mut scale = [0.0; 256];
 
         // ASCII characters (space to ~) get small positive weight
-        for i in 32..=126 {
-            scale[i] = 0.001;
+        for item in scale.iter_mut().take(126 + 1).skip(32) {
+            *item = 0.001;
         }
 
         // KOI8-R/KOI8-U Cyrillic characters with their frequencies
