@@ -4,6 +4,8 @@ use clap::Parser;
 use encoding_rs::*;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::path::Path;
+use tempfile::NamedTempFile;
 use zip::write::FileOptions;
 use zip::{ZipArchive, ZipWriter};
 
@@ -189,9 +191,11 @@ fn fix_cyrillic_filenames(
         }
     } else {
         // For actual modification, we need to create a new archive
-        let temp_file = format!("{}.tmp", zipfile);
-        let output_file = File::create(&temp_file).context("Failed to create temporary file")?;
-        let mut zip_writer = ZipWriter::new(output_file);
+        let zipfile_path = Path::new(zipfile);
+        let temp_file =
+            NamedTempFile::new_in(zipfile_path.parent().unwrap_or_else(|| Path::new(".")))
+                .context("Failed to create temporary file")?;
+        let mut zip_writer = ZipWriter::new(&temp_file);
 
         for i in 0..file_count {
             let mut file_entry = archive.by_index(i).context("Failed to read file entry")?;
@@ -270,8 +274,9 @@ fn fix_cyrillic_filenames(
             .context("Failed to finalize new archive")?;
         drop(archive); // Close the original file
 
-        // Replace original with modified version
-        std::fs::rename(&temp_file, zipfile)
+        // Atomically replace original with modified version
+        temp_file
+            .persist(zipfile)
             .context("Failed to replace original file with modified version")?;
     }
 
